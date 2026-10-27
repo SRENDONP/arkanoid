@@ -160,6 +160,17 @@ Convenciones:
 - **Sí:** pantalla de inicio. Además, la primera pulsación desbloquea el audio en navegadores con política de autoplay.
 - **Sí:** `cloneNode().play()` para los sonidos. Permite que se solapen rebotes rápidos sin cortar el anterior.
 
+### Decisiones tomadas durante la implementación
+
+Detalles que el spec no fijaba y que se resolvieron al implementarlo:
+
+- **Sí:** cada movimiento del ratón coloca la paleta una sola vez (`mouseX` se consume). Así el teclado sigue funcionando aunque el cursor esté sobre el canvas.
+- **Sí:** al chocar con un ladrillo, la velocidad toma el signo que aleja la pelota de su centro en vez de invertirse sin más. Evita que la pelota quede atrapada si sigue solapando en el frame siguiente.
+- **Sí:** desde `start`, Espacio lleva a `serve` y hace falta otra pulsación (o un clic) para lanzar. Se ignora la repetición de tecla.
+- **Sí:** la franja del HUD tiene fondo `#222` para que se vea el techo, y los títulos de los mensajes van a 26 px para que quepan en el canvas.
+- **Sí:** la pausa solo funciona en `playing`. En `serve`, P y Esc no hacen nada.
+- **Sí:** el destello del gris y las explosiones se miden en tiempo real, así que avanzan durante la pausa. Duran 100 y 150 ms, así que no se nota.
+
 ## Riesgos
 
 | Riesgo | Mitigación |
