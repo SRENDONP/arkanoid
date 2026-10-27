@@ -9,11 +9,16 @@ const BALL_SIZE = 12;
 
 // Velocidades en px/segundo (movimiento con delta time)
 const PADDLE_SPEED = 420;
-const BALL_SPEED = 300;           // constante en este spec
+const BALL_SPEED = 300;           // velocidad en el nivel 1
+const SPEED_STEP = 0.15;          // +15% por nivel sobre BALL_SPEED
 const SERVE_ANGLE = Math.PI / 6;  // saque: 30° a la derecha respecto a la vertical
 const MAX_BOUNCE_ANGLE = Math.PI / 3; // 60° respecto a la vertical
 
 const FLASH_MS = 100;             // destello blanco del gris al primer golpe
+
+// Récords: top 5 en localStorage
+const HIGHSCORES_KEY = 'arkanoid:highscores:v1';
+const HIGHSCORES_MAX = 5;
 
 // dt máximo por frame (s), para que una pestaña en segundo plano no provoque saltos
 const MAX_DT = 1 / 30;
@@ -29,7 +34,7 @@ const BRICK_TYPES = {
   C: { color: 'cyan',    hits: 1, points: 70 },
 };
 
-// Nivel único: 13 columnas por fila, '.' = hueco
+// Niveles: 13 columnas por fila, '.' = hueco
 const LEVEL_1 = [
   'SSSSSSSSSSSSS',
   'YYYYYYYYYYYYY',
@@ -39,6 +44,28 @@ const LEVEL_1 = [
   'GGGGGGGGGGGGG',
   'CCCCCCCCCCCCC',
 ];
+
+const LEVEL_2 = [
+  '.YYYYYYYYYYY.',
+  '..PPPPPPPPP..',
+  'S..MMMMMMM..S',
+  'SS..RRRRR..SS',
+  'SSS..GGG..SSS',
+  'SSSS..C..SSSS',
+];
+
+const LEVEL_3 = [
+  'SSSSSSSSSSSSS',
+  'Y.Y.Y.Y.Y.Y.Y',
+  'PPPPPPPPPPPPP',
+  'S.S.S.S.S.S.S',
+  'MMMMMMMMMMMMM',
+  'RRRRRRRRRRRRR',
+  'G.G.G.G.G.G.G',
+  'CCCCCCCCCCCCC',
+];
+
+const LEVELS = [LEVEL_1, LEVEL_2, LEVEL_3];
 
 // Convierte una cuadrícula ASCII en la lista de ladrillos
 function buildBricks(level) {
@@ -65,9 +92,12 @@ const ctx = canvas.getContext('2d');
 
 // Estado del juego
 const state = {
-  mode: 'start',   // 'start' | 'serve' | 'playing' | 'paused' | 'won' | 'gameover'
+  mode: 'start',   // 'start' | 'serve' | 'playing' | 'paused' | 'levelclear' | 'won' | 'gameover'
+  level: 1,        // 1..LEVELS.length; el nivel actual es LEVELS[level - 1]
   score: 0,
   lives: 3,
+  highScores: [],  // { score, level, date }, ordenado de mayor a menor score
+  newEntryIndex: -1, // posición en highScores de la partida recién terminada, o -1
   paddle: { x: 200, y: PADDLE_Y, w: PADDLE_W, h: PADDLE_H },
   ball: { x: 0, y: 0, vx: 0, vy: 0, size: BALL_SIZE },
   bricks: [],
@@ -88,15 +118,81 @@ function playSound(sound) {
   sound.cloneNode().play().catch(() => {});
 }
 
-// Partida nueva: 0 puntos, 3 vidas, nivel completo y pelota en la paleta
+// Una entrada válida: score entero > 0, level entero 1..LEVELS.length y date 'YYYY-MM-DD'
+function isValidEntry(e) {
+  return e !== null && typeof e === 'object' &&
+    Number.isInteger(e.score) && e.score > 0 &&
+    Number.isInteger(e.level) && e.level >= 1 && e.level <= LEVELS.length &&
+    typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date);
+}
+
+// Lee el top 5; ante JSON inválido, un valor que no es array o localStorage
+// inaccesible devuelve []. Las entradas con campos incorrectos se descartan
+function loadHighScores() {
+  try {
+    const data = JSON.parse(localStorage.getItem(HIGHSCORES_KEY));
+    if (!Array.isArray(data)) return [];
+    return data.filter(isValidEntry).slice(0, HIGHSCORES_MAX);
+  } catch (err) {
+    return [];
+  }
+}
+
+// Si localStorage falla (modo privado, cuota), la tabla vive solo en memoria
+function saveHighScores() {
+  try {
+    localStorage.setItem(HIGHSCORES_KEY, JSON.stringify(state.highScores));
+  } catch (err) {
+    // sin persistencia; el juego sigue funcionando
+  }
+}
+
+// Fecha local en formato 'YYYY-MM-DD'
+function todayISO() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+// Al terminar la partida: entra si score > 0 y hay hueco o supera estrictamente
+// a la 5ª. Ante un empate la nueva va detrás
+function submitScore() {
+  const scores = state.highScores;
+  const fits = scores.length < HIGHSCORES_MAX || state.score > scores[HIGHSCORES_MAX - 1].score;
+  if (state.score <= 0 || !fits) {
+    state.newEntryIndex = -1;
+    return;
+  }
+
+  let index = scores.findIndex((e) => e.score < state.score);
+  if (index === -1) index = scores.length;
+  scores.splice(index, 0, { score: state.score, level: state.level, date: todayISO() });
+  scores.length = Math.min(scores.length, HIGHSCORES_MAX);
+  saveHighScores();
+  state.newEntryIndex = index;
+}
+
+// Partida nueva: nivel 1, 0 puntos, 3 vidas, nivel completo y pelota en la paleta
 function resetGame(mode) {
   state.mode = mode;
+  state.level = 1;
   state.score = 0;
   state.lives = 3;
+  state.newEntryIndex = -1;
   state.paddle.x = 200;
-  state.bricks = buildBricks(LEVEL_1);
+  state.bricks = buildBricks(LEVELS[0]);
   state.explosions = [];
   placeBallOnPaddle();
+}
+
+// Nivel siguiente: conserva puntos y vidas; paleta al centro y pelota en la paleta
+function nextLevel() {
+  state.level += 1;
+  state.bricks = buildBricks(LEVELS[state.level - 1]);
+  state.explosions = [];
+  state.paddle.x = 200;
+  placeBallOnPaddle();
+  state.mode = 'serve';
 }
 
 function placeBallOnPaddle() {
@@ -141,6 +237,8 @@ function onSpace() {
     state.mode = 'serve';
   } else if (state.mode === 'serve') {
     launchBall();
+  } else if (state.mode === 'levelclear') {
+    nextLevel();
   } else if (state.mode === 'won' || state.mode === 'gameover') {
     resetGame('serve');
   }
@@ -154,16 +252,27 @@ function togglePause() {
   }
 }
 
+// Velocidad de la pelota en el nivel actual: 300, 345 y 390 px/s
+function ballSpeed() {
+  return BALL_SPEED * (1 + SPEED_STEP * (state.level - 1));
+}
+
 function launchBall() {
   if (state.mode !== 'serve') return;
-  state.ball.vx = BALL_SPEED * Math.sin(SERVE_ANGLE);
-  state.ball.vy = -BALL_SPEED * Math.cos(SERVE_ANGLE);
+  const speed = ballSpeed();
+  state.ball.vx = speed * Math.sin(SERVE_ANGLE);
+  state.ball.vy = -speed * Math.cos(SERVE_ANGLE);
   state.mode = 'playing';
 }
 
 function loseLife() {
   state.lives -= 1;
-  state.mode = state.lives > 0 ? 'serve' : 'gameover';
+  if (state.lives > 0) {
+    state.mode = 'serve';
+  } else {
+    state.mode = 'gameover';
+    submitScore();
+  }
 }
 
 function updatePaddle(dt) {
@@ -198,8 +307,9 @@ function bounceOffPaddle(ball, paddle) {
   const offset = Math.max(-1, Math.min(1, (ballCenter - paddleCenter) / (PADDLE_W / 2)));
   const angle = offset * MAX_BOUNCE_ANGLE;
 
-  ball.vx = BALL_SPEED * Math.sin(angle);
-  ball.vy = -BALL_SPEED * Math.cos(angle);
+  const speed = ballSpeed();
+  ball.vx = speed * Math.sin(angle);
+  ball.vy = -speed * Math.cos(angle);
   ball.y = paddle.y - ball.size;
 }
 
@@ -272,7 +382,12 @@ function updateBall(dt) {
 
   collideBricks(ball);
   if (state.bricks.length === 0) {
-    state.mode = 'won';
+    if (state.level < LEVELS.length) {
+      state.mode = 'levelclear';
+    } else {
+      state.mode = 'won';
+      submitScore();
+    }
     return;
   }
 
@@ -290,7 +405,7 @@ function updateBall(dt) {
 }
 
 function update(dt) {
-  // En inicio, pausa, victoria y game over la partida está congelada
+  // En inicio, pausa, nivel superado, victoria y game over la partida está congelada
   if (state.mode !== 'serve' && state.mode !== 'playing') return;
   updatePaddle(dt);
   updateBall(dt);
@@ -301,28 +416,67 @@ function drawHud() {
   ctx.fillRect(0, 0, W, HUD_H);
 
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 16px monospace';
+  ctx.font = 'bold 14px monospace';
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   ctx.fillText('PUNTOS: ' + state.score, 12, HUD_H / 2);
+  ctx.textAlign = 'center';
+  const record = state.highScores.length > 0 ? state.highScores[0].score : 0;
+  ctx.fillText('RÉCORD: ' + record, 190, HUD_H / 2);
+  ctx.fillText('NIVEL: ' + state.level, 320, HUD_H / 2);
   ctx.textAlign = 'right';
   ctx.fillText('VIDAS: ' + state.lives, W - 12, HUD_H / 2);
 }
 
-// Texto centrado sobre un velo semitransparente
-function drawMessage(title, subtitle) {
+// 'YYYY-MM-DD' → 'DD/MM/AAAA'
+function formatDate(iso) {
+  const [y, m, d] = iso.split('-');
+  return d + '/' + m + '/' + y;
+}
+
+// Top 5 debajo del mensaje; la partida recién terminada, en amarillo
+function drawHighScores(y) {
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  if (state.newEntryIndex === 0) {
+    ctx.fillStyle = '#ff0';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText('¡Nuevo récord!', W / 2, y);
+  }
+  y += 36;
+
+  ctx.font = '16px monospace';
+  if (state.highScores.length === 0) {
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Sin récords todavía', W / 2, y);
+    return;
+  }
+  // Puntuación con ancho fijo (5 cifras) para que las columnas queden alineadas
+  state.highScores.forEach((e, i) => {
+    ctx.fillStyle = i === state.newEntryIndex ? '#ff0' : '#fff';
+    const row = (i + 1) + '. ' + String(e.score).padStart(5) + '  NIVEL ' + e.level + '  ' + formatDate(e.date);
+    ctx.fillText(row, W / 2, y + i * 26);
+  });
+}
+
+// Texto centrado sobre un velo semitransparente; con withTable el texto se
+// sube para dejar sitio al top 5 debajo
+function drawMessage(title, subtitle, withTable) {
   ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
   ctx.fillRect(0, HUD_H, W, H - HUD_H);
 
+  const titleY = withTable ? 200 : H / 2;
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = 'bold 26px monospace';
-  ctx.fillText(title, W / 2, H / 2);
+  ctx.fillText(title, W / 2, titleY);
   if (subtitle) {
     ctx.font = '18px monospace';
-    ctx.fillText(subtitle, W / 2, H / 2 + 40);
+    ctx.fillText(subtitle, W / 2, titleY + 40);
   }
+  if (withTable) drawHighScores(titleY + 100);
 }
 
 function draw() {
@@ -361,13 +515,15 @@ function draw() {
   drawHud();
 
   if (state.mode === 'start') {
-    drawMessage('Pulsa Espacio para empezar');
+    drawMessage('Pulsa Espacio para empezar', null, true);
   } else if (state.mode === 'paused') {
     drawMessage('PAUSA');
+  } else if (state.mode === 'levelclear') {
+    drawMessage('Nivel ' + state.level + ' superado', 'Espacio para continuar');
   } else if (state.mode === 'won') {
-    drawMessage('¡Has ganado!', 'Espacio para reiniciar');
+    drawMessage('¡Has ganado!', 'Espacio para reiniciar', true);
   } else if (state.mode === 'gameover') {
-    drawMessage('Game Over', 'Espacio para reiniciar');
+    drawMessage('Game Over', 'Espacio para reiniciar', true);
   }
 }
 
@@ -381,6 +537,7 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
+state.highScores = loadHighScores();
 resetGame('start');
 
 loadSpritesheet(() => {
