@@ -1,0 +1,391 @@
+// Constantes de geometría (px)
+const W = 480, H = 640;
+const HUD_H = 32;                 // franja superior para puntos y vidas
+const BRICK_W = 32, BRICK_H = 16;
+const COLS = 13;                  // 13 × 32 = 416 px
+const GRID_X = 32, GRID_Y = 64;   // esquina superior izquierda de la cuadrícula
+const PADDLE_W = 80, PADDLE_H = 14, PADDLE_Y = 600;
+const BALL_SIZE = 12;
+
+// Velocidades en px/segundo (movimiento con delta time)
+const PADDLE_SPEED = 420;
+const BALL_SPEED = 300;           // constante en este spec
+const SERVE_ANGLE = Math.PI / 6;  // saque: 30° a la derecha respecto a la vertical
+const MAX_BOUNCE_ANGLE = Math.PI / 3; // 60° respecto a la vertical
+
+const FLASH_MS = 100;             // destello blanco del gris al primer golpe
+
+// dt máximo por frame (s), para que una pestaña en segundo plano no provoque saltos
+const MAX_DT = 1 / 30;
+
+// Leyenda del nivel: letra → color de sprite
+const BRICK_TYPES = {
+  S: { color: 'gray',    hits: 2, points: 50 },
+  Y: { color: 'yellow',  hits: 1, points: 120 },
+  P: { color: 'hotpink', hits: 1, points: 110 },
+  M: { color: 'magenta', hits: 1, points: 100 },
+  R: { color: 'red',     hits: 1, points: 90 },
+  G: { color: 'green',   hits: 1, points: 80 },
+  C: { color: 'cyan',    hits: 1, points: 70 },
+};
+
+// Nivel único: 13 columnas por fila, '.' = hueco
+const LEVEL_1 = [
+  'SSSSSSSSSSSSS',
+  'YYYYYYYYYYYYY',
+  'PPPPPPPPPPPPP',
+  'MMMMMMMMMMMMM',
+  'RRRRRRRRRRRRR',
+  'GGGGGGGGGGGGG',
+  'CCCCCCCCCCCCC',
+];
+
+// Convierte una cuadrícula ASCII en la lista de ladrillos
+function buildBricks(level) {
+  const bricks = [];
+  level.forEach((row, r) => {
+    for (let c = 0; c < COLS; c++) {
+      const type = BRICK_TYPES[row[c]];
+      if (!type) continue;
+      bricks.push({
+        x: GRID_X + c * BRICK_W,
+        y: GRID_Y + r * BRICK_H,
+        color: type.color,
+        hits: type.hits,
+        points: type.points,
+        flashUntil: 0,
+      });
+    }
+  });
+  return bricks;
+}
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Estado del juego
+const state = {
+  mode: 'start',   // 'start' | 'serve' | 'playing' | 'paused' | 'won' | 'gameover'
+  score: 0,
+  lives: 3,
+  paddle: { x: 200, y: PADDLE_Y, w: PADDLE_W, h: PADDLE_H },
+  ball: { x: 0, y: 0, vx: 0, vy: 0, size: BALL_SIZE },
+  bricks: [],
+  explosions: [],
+  input: { left: false, right: false, mouseX: null },
+};
+
+let lastTime = 0;
+
+// Sonidos precargados; cada reproducción usa un clon para que se puedan solapar
+const SOUNDS = {
+  bounce: new Audio('assets/sounds/ball-bounce.mp3'),
+  break: new Audio('assets/sounds/break-sound.mp3'),
+};
+
+function playSound(sound) {
+  // play() puede rechazarse por la política de autoplay; no debe romper el juego
+  sound.cloneNode().play().catch(() => {});
+}
+
+// Partida nueva: 0 puntos, 3 vidas, nivel completo y pelota en la paleta
+function resetGame(mode) {
+  state.mode = mode;
+  state.score = 0;
+  state.lives = 3;
+  state.paddle.x = 200;
+  state.bricks = buildBricks(LEVEL_1);
+  state.explosions = [];
+  placeBallOnPaddle();
+}
+
+function placeBallOnPaddle() {
+  const ball = state.ball;
+  const paddle = state.paddle;
+  ball.x = paddle.x + paddle.w / 2 - ball.size / 2;
+  ball.y = paddle.y - ball.size;
+}
+
+// Entrada: teclado
+const KEYS_LEFT = ['ArrowLeft', 'KeyA'];
+const KEYS_RIGHT = ['ArrowRight', 'KeyD'];
+
+function onKey(e, pressed) {
+  if (e.code === 'Space') {
+    if (pressed && !e.repeat) onSpace();
+    e.preventDefault();
+  } else if (e.code === 'KeyP' || e.code === 'Escape') {
+    if (pressed && !e.repeat) togglePause();
+    e.preventDefault();
+  } else if (KEYS_LEFT.includes(e.code)) {
+    state.input.left = pressed;
+    e.preventDefault();
+  } else if (KEYS_RIGHT.includes(e.code)) {
+    state.input.right = pressed;
+    e.preventDefault();
+  }
+}
+
+window.addEventListener('keydown', (e) => onKey(e, true));
+window.addEventListener('keyup', (e) => onKey(e, false));
+
+// Entrada: ratón (X del cursor relativo al canvas)
+canvas.addEventListener('mousemove', (e) => {
+  state.input.mouseX = e.clientX - canvas.getBoundingClientRect().left;
+});
+
+canvas.addEventListener('click', () => launchBall());
+
+function onSpace() {
+  if (state.mode === 'start') {
+    state.mode = 'serve';
+  } else if (state.mode === 'serve') {
+    launchBall();
+  } else if (state.mode === 'won' || state.mode === 'gameover') {
+    resetGame('serve');
+  }
+}
+
+function togglePause() {
+  if (state.mode === 'playing') {
+    state.mode = 'paused';
+  } else if (state.mode === 'paused') {
+    state.mode = 'playing';
+  }
+}
+
+function launchBall() {
+  if (state.mode !== 'serve') return;
+  state.ball.vx = BALL_SPEED * Math.sin(SERVE_ANGLE);
+  state.ball.vy = -BALL_SPEED * Math.cos(SERVE_ANGLE);
+  state.mode = 'playing';
+}
+
+function loseLife() {
+  state.lives -= 1;
+  state.mode = state.lives > 0 ? 'serve' : 'gameover';
+}
+
+function updatePaddle(dt) {
+  const paddle = state.paddle;
+  const input = state.input;
+
+  // El ratón coloca el centro de la paleta en el X del cursor; se consume
+  // para que el teclado vuelva a mandar hasta el siguiente movimiento
+  if (input.mouseX !== null) {
+    paddle.x = input.mouseX - paddle.w / 2;
+    input.mouseX = null;
+  }
+
+  let dir = 0;
+  if (input.left) dir -= 1;
+  if (input.right) dir += 1;
+  paddle.x += dir * PADDLE_SPEED * dt;
+
+  paddle.x = Math.max(0, Math.min(W - paddle.w, paddle.x));
+}
+
+// Solapamiento AABB entre dos rectángulos
+function overlaps(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+// El ángulo de salida depende del punto de impacto: el centro manda la
+// pelota casi vertical y los extremos, en diagonal (máx. MAX_BOUNCE_ANGLE)
+function bounceOffPaddle(ball, paddle) {
+  const ballCenter = ball.x + ball.size / 2;
+  const paddleCenter = paddle.x + paddle.w / 2;
+  const offset = Math.max(-1, Math.min(1, (ballCenter - paddleCenter) / (PADDLE_W / 2)));
+  const angle = offset * MAX_BOUNCE_ANGLE;
+
+  ball.vx = BALL_SPEED * Math.sin(angle);
+  ball.vy = -BALL_SPEED * Math.cos(angle);
+  ball.y = paddle.y - ball.size;
+}
+
+// Como máximo un ladrillo por frame. Se invierte la velocidad en el eje de
+// menor solapamiento, alejando la pelota del ladrillo para no volver a
+// invertirla en el frame siguiente si aún se solapan
+function collideBricks(ball) {
+  for (let i = 0; i < state.bricks.length; i++) {
+    const brick = state.bricks[i];
+    if (!overlaps(ball.x, ball.y, ball.size, ball.size,
+                  brick.x, brick.y, BRICK_W, BRICK_H)) continue;
+
+    const overlapX = Math.min(ball.x + ball.size - brick.x, brick.x + BRICK_W - ball.x);
+    const overlapY = Math.min(ball.y + ball.size - brick.y, brick.y + BRICK_H - ball.y);
+    const ballLeftOfCenter = ball.x + ball.size / 2 < brick.x + BRICK_W / 2;
+    const ballAboveCenter = ball.y + ball.size / 2 < brick.y + BRICK_H / 2;
+
+    if (overlapX < overlapY) {
+      ball.vx = ballLeftOfCenter ? -Math.abs(ball.vx) : Math.abs(ball.vx);
+    } else {
+      ball.vy = ballAboveCenter ? -Math.abs(ball.vy) : Math.abs(ball.vy);
+    }
+
+    brick.hits -= 1;
+    if (brick.hits <= 0) {
+      state.bricks.splice(i, 1);
+      state.score += brick.points;
+      state.explosions.push({ x: brick.x, y: brick.y, color: brick.color, startedAt: performance.now() });
+      playSound(SOUNDS.break);
+    } else {
+      if (brick.color === 'gray') {
+        brick.flashUntil = performance.now() + FLASH_MS;
+      }
+      playSound(SOUNDS.bounce);
+    }
+    return;
+  }
+}
+
+function updateBall(dt) {
+  const ball = state.ball;
+  const paddle = state.paddle;
+
+  // En el saque la pelota va pegada sobre el centro de la paleta
+  if (state.mode === 'serve') {
+    placeBallOnPaddle();
+    return;
+  }
+
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+
+  // Paredes laterales
+  if (ball.x < 0) {
+    ball.x = 0;
+    ball.vx = Math.abs(ball.vx);
+    playSound(SOUNDS.bounce);
+  } else if (ball.x + ball.size > W) {
+    ball.x = W - ball.size;
+    ball.vx = -Math.abs(ball.vx);
+    playSound(SOUNDS.bounce);
+  }
+
+  // Techo: borde inferior del HUD
+  if (ball.y < HUD_H) {
+    ball.y = HUD_H;
+    ball.vy = Math.abs(ball.vy);
+    playSound(SOUNDS.bounce);
+  }
+
+  collideBricks(ball);
+  if (state.bricks.length === 0) {
+    state.mode = 'won';
+    return;
+  }
+
+  // Paleta: solo rebota si la pelota baja
+  if (ball.vy > 0 && overlaps(ball.x, ball.y, ball.size, ball.size,
+                              paddle.x, paddle.y, paddle.w, paddle.h)) {
+    bounceOffPaddle(ball, paddle);
+    playSound(SOUNDS.bounce);
+  }
+
+  // Cae por abajo
+  if (ball.y > H) {
+    loseLife();
+  }
+}
+
+function update(dt) {
+  // En inicio, pausa, victoria y game over la partida está congelada
+  if (state.mode !== 'serve' && state.mode !== 'playing') return;
+  updatePaddle(dt);
+  updateBall(dt);
+}
+
+function drawHud() {
+  ctx.fillStyle = '#222';
+  ctx.fillRect(0, 0, W, HUD_H);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 16px monospace';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillText('PUNTOS: ' + state.score, 12, HUD_H / 2);
+  ctx.textAlign = 'right';
+  ctx.fillText('VIDAS: ' + state.lives, W - 12, HUD_H / 2);
+}
+
+// Texto centrado sobre un velo semitransparente
+function drawMessage(title, subtitle) {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, HUD_H, W, H - HUD_H);
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText(title, W / 2, H / 2);
+  if (subtitle) {
+    ctx.font = '18px monospace';
+    ctx.fillText(subtitle, W / 2, H / 2 + 40);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  const now = performance.now();
+  for (const brick of state.bricks) {
+    if (brick.flashUntil > now) {
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(brick.x, brick.y, BRICK_W, BRICK_H);
+      continue;
+    }
+    // Gris dañado: atenuado, porque el spritesheet no tiene sprite de daño
+    ctx.globalAlpha = brick.color === 'gray' && brick.hits === 1 ? 0.6 : 1;
+    drawSprite(ctx, 'block_' + brick.color, brick.x, brick.y, BRICK_W, BRICK_H);
+  }
+  ctx.globalAlpha = 1;
+
+  // Explosiones: 4 frames repartidos en EXPLOSION_DURATION; no colisionan
+  state.explosions = state.explosions.filter((ex) => now - ex.startedAt <= EXPLOSION_DURATION);
+  for (const ex of state.explosions) {
+    const frames = EXPLOSION_FRAMES[ex.color];
+    if (!frames) continue;
+    const elapsed = now - ex.startedAt;
+    const frame = Math.min(frames.length - 1, Math.floor(elapsed / (EXPLOSION_DURATION / 4)));
+    drawFrame(ctx, frames[frame], ex.x, ex.y, BRICK_W, BRICK_H);
+  }
+
+  const paddle = state.paddle;
+  drawSprite(ctx, 'paddle', paddle.x, paddle.y, paddle.w, paddle.h);
+
+  const ball = state.ball;
+  drawSprite(ctx, 'ball', ball.x, ball.y, ball.size, ball.size);
+
+  drawHud();
+
+  if (state.mode === 'start') {
+    drawMessage('Pulsa Espacio para empezar');
+  } else if (state.mode === 'paused') {
+    drawMessage('PAUSA');
+  } else if (state.mode === 'won') {
+    drawMessage('¡Has ganado!', 'Espacio para reiniciar');
+  } else if (state.mode === 'gameover') {
+    drawMessage('Game Over', 'Espacio para reiniciar');
+  }
+}
+
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000, MAX_DT);
+  lastTime = now;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+resetGame('start');
+
+loadSpritesheet(() => {
+  requestAnimationFrame((now) => {
+    lastTime = now;
+    requestAnimationFrame(loop);
+  });
+});
