@@ -20,6 +20,13 @@ const FLASH_MS = 100;             // destello blanco del gris al primer golpe
 const HIGHSCORES_KEY = 'arkanoid:highscores:v1';
 const HIGHSCORES_MAX = 5;
 
+// Power-up de multibola
+const POWERUP_CHANCE = 0.1;       // probabilidad de soltar cápsula al romper un ladrillo
+const CAPSULE_W = 32, CAPSULE_H = 14;
+const CAPSULE_SPEED = 150;        // px/s, caída vertical
+const CAPSULE_COLOR = '#f80';
+const MULTIBALL_ANGLES = [-Math.PI / 4, 0, Math.PI / 4]; // 3 bolas nuevas, respecto a la vertical, hacia arriba
+
 // dt máximo por frame (s), para que una pestaña en segundo plano no provoque saltos
 const MAX_DT = 1 / 30;
 
@@ -99,7 +106,8 @@ const state = {
   highScores: [],  // { score, level, date }, ordenado de mayor a menor score
   newEntryIndex: -1, // posición en highScores de la partida recién terminada, o -1
   paddle: { x: 200, y: PADDLE_Y, w: PADDLE_W, h: PADDLE_H },
-  ball: { x: 0, y: 0, vx: 0, vy: 0, size: BALL_SIZE },
+  balls: [],       // { x, y, vx, vy, size }; en el saque, exactamente 1
+  capsule: null,   // null | { x, y }: la cápsula en vuelo, como mucho una
   bricks: [],
   explosions: [],
   input: { left: false, right: false, mouseX: null },
@@ -182,6 +190,8 @@ function resetGame(mode) {
   state.paddle.x = 200;
   state.bricks = buildBricks(LEVELS[0]);
   state.explosions = [];
+  state.balls = [createBall()];
+  state.capsule = null;
   placeBallOnPaddle();
 }
 
@@ -191,12 +201,19 @@ function nextLevel() {
   state.bricks = buildBricks(LEVELS[state.level - 1]);
   state.explosions = [];
   state.paddle.x = 200;
+  state.balls = [createBall()];
+  state.capsule = null;
   placeBallOnPaddle();
   state.mode = 'serve';
 }
 
+function createBall() {
+  return { x: 0, y: 0, vx: 0, vy: 0, size: BALL_SIZE };
+}
+
+// En el saque hay una sola bola, state.balls[0]
 function placeBallOnPaddle() {
-  const ball = state.ball;
+  const ball = state.balls[0];
   const paddle = state.paddle;
   ball.x = paddle.x + paddle.w / 2 - ball.size / 2;
   ball.y = paddle.y - ball.size;
@@ -260,14 +277,19 @@ function ballSpeed() {
 function launchBall() {
   if (state.mode !== 'serve') return;
   const speed = ballSpeed();
-  state.ball.vx = speed * Math.sin(SERVE_ANGLE);
-  state.ball.vy = -speed * Math.cos(SERVE_ANGLE);
+  const ball = state.balls[0];
+  ball.vx = speed * Math.sin(SERVE_ANGLE);
+  ball.vy = -speed * Math.cos(SERVE_ANGLE);
   state.mode = 'playing';
 }
 
+// Se llama cuando cae la última bola
 function loseLife() {
   state.lives -= 1;
+  state.capsule = null;
   if (state.lives > 0) {
+    state.balls = [createBall()];
+    placeBallOnPaddle();
     state.mode = 'serve';
   } else {
     state.mode = 'gameover';
@@ -339,6 +361,10 @@ function collideBricks(ball) {
       state.score += brick.points;
       state.explosions.push({ x: brick.x, y: brick.y, color: brick.color, startedAt: performance.now() });
       playSound(SOUNDS.break);
+      // Solo una cápsula a la vez y nunca con multibola
+      if (state.capsule === null && state.balls.length === 1 && Math.random() < POWERUP_CHANCE) {
+        spawnCapsule(brick.x, brick.y + 1);
+      }
     } else {
       if (brick.color === 'gray') {
         brick.flashUntil = performance.now() + FLASH_MS;
@@ -349,8 +375,35 @@ function collideBricks(ball) {
   }
 }
 
+// Choque entre bolas: solo si se solapan y se acercan. n va del centro de A
+// al de B; la componente de A sobre n pasa a negativa y la de B a positiva,
+// así cada bola se aleja de la otra y conserva su rapidez
+function collideBalls() {
+  const balls = state.balls;
+  for (let i = 0; i < balls.length; i++) {
+    for (let j = i + 1; j < balls.length; j++) {
+      const a = balls[i], b = balls[j];
+      const dx = (b.x + b.size / 2) - (a.x + a.size / 2);
+      const dy = (b.y + b.size / 2) - (a.y + a.size / 2);
+      const dist = Math.hypot(dx, dy);
+      if (dist === 0 || dist >= BALL_SIZE) continue;
+
+      const nx = dx / dist, ny = dy / dist;
+      const approaching = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny < 0;
+      if (!approaching) continue;
+
+      const an = a.vx * nx + a.vy * ny;
+      const bn = b.vx * nx + b.vy * ny;
+      a.vx += (-Math.abs(an) - an) * nx;
+      a.vy += (-Math.abs(an) - an) * ny;
+      b.vx += (Math.abs(bn) - bn) * nx;
+      b.vy += (Math.abs(bn) - bn) * ny;
+      playSound(SOUNDS.bounce);
+    }
+  }
+}
+
 function updateBall(dt) {
-  const ball = state.ball;
   const paddle = state.paddle;
 
   // En el saque la pelota va pegada sobre el centro de la paleta
@@ -359,48 +412,91 @@ function updateBall(dt) {
     return;
   }
 
-  ball.x += ball.vx * dt;
-  ball.y += ball.vy * dt;
+  for (const ball of state.balls) {
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
 
-  // Paredes laterales
-  if (ball.x < 0) {
-    ball.x = 0;
-    ball.vx = Math.abs(ball.vx);
-    playSound(SOUNDS.bounce);
-  } else if (ball.x + ball.size > W) {
-    ball.x = W - ball.size;
-    ball.vx = -Math.abs(ball.vx);
-    playSound(SOUNDS.bounce);
-  }
-
-  // Techo: borde inferior del HUD
-  if (ball.y < HUD_H) {
-    ball.y = HUD_H;
-    ball.vy = Math.abs(ball.vy);
-    playSound(SOUNDS.bounce);
-  }
-
-  collideBricks(ball);
-  if (state.bricks.length === 0) {
-    if (state.level < LEVELS.length) {
-      state.mode = 'levelclear';
-    } else {
-      state.mode = 'won';
-      submitScore();
+    // Paredes laterales
+    if (ball.x < 0) {
+      ball.x = 0;
+      ball.vx = Math.abs(ball.vx);
+      playSound(SOUNDS.bounce);
+    } else if (ball.x + ball.size > W) {
+      ball.x = W - ball.size;
+      ball.vx = -Math.abs(ball.vx);
+      playSound(SOUNDS.bounce);
     }
-    return;
+
+    // Techo: borde inferior del HUD
+    if (ball.y < HUD_H) {
+      ball.y = HUD_H;
+      ball.vy = Math.abs(ball.vy);
+      playSound(SOUNDS.bounce);
+    }
+
+    collideBricks(ball);
+    if (state.bricks.length === 0) {
+      if (state.level < LEVELS.length) {
+        state.mode = 'levelclear';
+      } else {
+        state.mode = 'won';
+        submitScore();
+      }
+      return;
+    }
+
+    // Paleta: solo rebota si la pelota baja
+    if (ball.vy > 0 && overlaps(ball.x, ball.y, ball.size, ball.size,
+                                paddle.x, paddle.y, paddle.w, paddle.h)) {
+      bounceOffPaddle(ball, paddle);
+      playSound(SOUNDS.bounce);
+    }
   }
 
-  // Paleta: solo rebota si la pelota baja
-  if (ball.vy > 0 && overlaps(ball.x, ball.y, ball.size, ball.size,
-                              paddle.x, paddle.y, paddle.w, paddle.h)) {
-    bounceOffPaddle(ball, paddle);
-    playSound(SOUNDS.bounce);
-  }
+  collideBalls();
 
-  // Cae por abajo
-  if (ball.y > H) {
+  // Las bolas que caen por abajo se eliminan; la vida solo se pierde con la última
+  state.balls = state.balls.filter((ball) => ball.y <= H);
+  if (state.balls.length === 0) {
     loseLife();
+  }
+}
+
+// Global para poder soltar una cápsula desde la consola: spawnCapsule(200, 300)
+function spawnCapsule(x, y) {
+  state.capsule = { x, y };
+}
+
+// Cae en vertical; al tocar la paleta se atrapa y, si llega abajo, se pierde
+function updateCapsule(dt) {
+  const capsule = state.capsule;
+  if (!capsule) return;
+
+  capsule.y += CAPSULE_SPEED * dt;
+
+  const paddle = state.paddle;
+  if (overlaps(capsule.x, capsule.y, CAPSULE_W, CAPSULE_H,
+               paddle.x, paddle.y, paddle.w, paddle.h)) {
+    state.capsule = null;
+    playSound(SOUNDS.bounce);
+    activateMultiball();
+  } else if (capsule.y > H) {
+    state.capsule = null;
+  }
+}
+
+// La cápsula solo nace con 1 bola en juego, así que state.balls[0] es el
+// origen de las 3 nuevas; la original conserva su velocidad
+function activateMultiball() {
+  const origin = state.balls[0];
+  const speed = ballSpeed();
+  for (const angle of MULTIBALL_ANGLES) {
+    const ball = createBall();
+    ball.x = origin.x;
+    ball.y = origin.y;
+    ball.vx = speed * Math.sin(angle);
+    ball.vy = -speed * Math.cos(angle);
+    state.balls.push(ball);
   }
 }
 
@@ -409,6 +505,25 @@ function update(dt) {
   if (state.mode !== 'serve' && state.mode !== 'playing') return;
   updatePaddle(dt);
   updateBall(dt);
+  // updateBall puede haber cambiado de modo (vida perdida, nivel superado)
+  if (state.mode === 'playing') updateCapsule(dt);
+}
+
+// Rectángulo redondeado naranja con una "D" (Disruption)
+function drawCapsule() {
+  const capsule = state.capsule;
+  if (!capsule) return;
+
+  ctx.fillStyle = CAPSULE_COLOR;
+  ctx.beginPath();
+  ctx.roundRect(capsule.x, capsule.y, CAPSULE_W, CAPSULE_H, 7);
+  ctx.fill();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('D', capsule.x + CAPSULE_W / 2, capsule.y + CAPSULE_H / 2);
 }
 
 function drawHud() {
@@ -506,11 +621,14 @@ function draw() {
     drawFrame(ctx, frames[frame], ex.x, ex.y, BRICK_W, BRICK_H);
   }
 
+  drawCapsule();
+
   const paddle = state.paddle;
   drawSprite(ctx, 'paddle', paddle.x, paddle.y, paddle.w, paddle.h);
 
-  const ball = state.ball;
-  drawSprite(ctx, 'ball', ball.x, ball.y, ball.size, ball.size);
+  for (const ball of state.balls) {
+    drawSprite(ctx, 'ball', ball.x, ball.y, ball.size, ball.size);
+  }
 
   drawHud();
 
