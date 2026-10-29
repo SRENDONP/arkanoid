@@ -1,6 +1,6 @@
 # SPEC 03 — Power-up de multibola
 
-> **Estado:** Aprobado
+> **Estado:** Implementado
 > **Depende de:** SPEC 01, SPEC 02
 > **Fecha:** 2026-10-29
 > **Objetivo:** Que cualquier ladrillo roto pueda soltar una cápsula que cae en vertical y que, si la atrapa la paleta, añade 3 bolas más a la partida, de modo que solo se pierde una vida cuando cae la última bola.
